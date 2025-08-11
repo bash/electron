@@ -26,10 +26,9 @@ TrashItemResult TrashItemOnBlockingThread(const base::FilePath& full_path) {
   return {success, error};
 }
 
-}  // namespace
-
-void TrashItem(const base::FilePath& full_path,
-               base::OnceCallback<void(bool, const std::string&)> callback) {
+void TrashItemSync(
+    const base::FilePath& full_path,
+    base::OnceCallback<void(bool, const std::string&)> callback) {
   // XXX: is continue_on_shutdown right?
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE,
@@ -43,6 +42,36 @@ void TrashItem(const base::FilePath& full_path,
             std::move(callback).Run(result.success, result.error);
           },
           std::move(callback)));
+}
+
+}  // namespace
+
+void TrashItem(const base::FilePath& full_path,
+               base::OnceCallback<void(bool, const std::string&)> callback) {
+#if BUILDFLAG(IS_LINUX)
+  internal::PlatformTrashItemAsync(
+      full_path,
+      base::BindOnce(
+          [](const base::FilePath& full_path,
+             base::OnceCallback<void(bool, const std::string&)> callback,
+             const internal::PlatformTrashItemAsyncResult result,
+             const std::string& error) {
+            switch (result) {
+              case internal::PlatformTrashItemAsyncResult::Success:
+                std::move(callback).Run(true, error);
+                break;
+              case internal::PlatformTrashItemAsyncResult::Failure:
+                std::move(callback).Run(false, error);
+                break;
+              case internal::PlatformTrashItemAsyncResult::Unsupported:
+                TrashItemSync(full_path, std::move(callback));
+                break;
+            }
+          },
+          full_path, std::move(callback)));
+#else
+  TrashItemSync(full_path, std::move(callback));
+#endif
 }
 
 }  // namespace platform_util

@@ -15,9 +15,18 @@ class FilePath;
 
 namespace platform_util::internal {
 
+enum struct PlatformTrashItemAsyncResult { Success, Unsupported, Failure };
+
 // Called by platform_util.cc on to invoke platform specific logic to move
 // |path| to trash using a suitable handler.
 bool PlatformTrashItem(const base::FilePath& path, std::string* error);
+
+#if BUILDFLAG(IS_LINUX)
+void PlatformTrashItemAsync(
+    const base::FilePath& path,
+    base::OnceCallback<void(PlatformTrashItemAsyncResult, const std::string&)>
+        callback);
+#endif
 
 }  // namespace platform_util::internal
 

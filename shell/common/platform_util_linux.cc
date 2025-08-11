@@ -7,6 +7,7 @@
 #include <fcntl.h>
 
 #include <stdio.h>
+#include <format>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +47,7 @@ void OpenFolder(const base::FilePath& full_path);
 }
 
 namespace {
+using namespace platform_util::internal;
 
 const char kMethodListActivatableNames[] = "ListActivatableNames";
 const char kMethodNameHasOwner[] = "NameHasOwner";
@@ -58,10 +60,12 @@ const char kMethodShowItems[] = "ShowItems";
 const char kFreedesktopPortalName[] = "org.freedesktop.portal.Desktop";
 const char kFreedesktopPortalPath[] = "/org/freedesktop/portal/desktop";
 const char kFreedesktopPortalOpenURI[] = "org.freedesktop.portal.OpenURI";
+const char kFreedesktopPortalTrash[] = "org.freedesktop.portal.Trash";
 
 const char kOriginalXdgCurrentDesktopEnvVar[] = "ORIGINAL_XDG_CURRENT_DESKTOP";
 
 const char kMethodOpenDirectory[] = "OpenDirectory";
+const char kMethodTrashFile[] = "TrashFile";
 
 class ShowItemHelper {
  public:
@@ -251,6 +255,88 @@ class ShowItemHelper {
   std::optional<bool> prefer_filemanager_interface_;
 };
 
+class TrashItemHelper {
+ public:
+  static TrashItemHelper& GetInstance() {
+    static base::NoDestructor<TrashItemHelper> instance;
+    return *instance;
+  }
+
+  TrashItemHelper() = default;
+
+  TrashItemHelper(const TrashItemHelper&) = delete;
+  TrashItemHelper& operator=(const TrashItemHelper&) = delete;
+
+  void TrashItemUsingPortal(
+      const base::FilePath& full_path,
+      base::OnceCallback<void(PlatformTrashItemAsyncResult, const std::string&)>
+          callback) {
+    if (!bus_)
+      bus_ = dbus_thread_linux::GetSharedSessionBus();
+
+    if (!object_proxy_)
+      object_proxy_ = object_proxy_ = bus_->GetObjectProxy(
+          kFreedesktopPortalName, dbus::ObjectPath(kFreedesktopPortalPath));
+
+    dbus::MethodCall method_call(kFreedesktopPortalTrash, kMethodTrashFile);
+    dbus::MessageWriter writer(&method_call);
+
+    base::ScopedFD fd(
+        HANDLE_EINTR(open(full_path.value().c_str(), O_RDWR | O_CLOEXEC)));
+    if (!fd.is_valid()) {
+      auto const error_message =
+          std::format("Failed to open {} for URI portal", full_path.value());
+      std::move(callback).Run(PlatformTrashItemAsyncResult::Failure,
+                              error_message);
+      return;
+    }
+
+    writer.AppendFileDescriptor(fd.get());
+
+    object_proxy_->CallMethodWithErrorResponse(
+        &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
+        base::BindOnce(&TrashItemHelper::CheckTrashResponse,
+                       base::Unretained(this), full_path, std::move(callback)));
+  }
+
+ private:
+  void CheckTrashResponse(const base::FilePath& full_path,
+                          base::OnceCallback<void(PlatformTrashItemAsyncResult,
+                                                  const std::string&)> callback,
+                          dbus::Response* response,
+                          dbus::ErrorResponse* errorResponse) {
+    if (errorResponse) {
+      auto const errorName = errorResponse->GetErrorName();
+      if (errorName == DBUS_ERROR_NAME_HAS_NO_OWNER ||
+          errorName == DBUS_ERROR_UNKNOWN_METHOD) {
+        std::move(callback).Run(PlatformTrashItemAsyncResult::Unsupported, "");
+      } else {
+        auto const errorMessage =
+            std::format("Failed to call {}: {}", kMethodTrashFile, errorName);
+        std::move(callback).Run(PlatformTrashItemAsyncResult::Failure,
+                                errorMessage);
+      }
+      return;
+    }
+
+    if (!response) {
+      auto const error_message =
+          std::format("Failed to call {}", kMethodTrashFile);
+      std::move(callback).Run(PlatformTrashItemAsyncResult::Failure,
+                              error_message);
+      return;
+    }
+
+    // TODO: cache unsupported result
+
+    // TODO: read & check result
+    std::move(callback).Run(PlatformTrashItemAsyncResult::Success, "");
+  }
+
+  scoped_refptr<dbus::Bus> bus_;
+  raw_ptr<dbus::ObjectProxy> object_proxy_ = nullptr;
+};
+
 // Descriptions pulled from https://linux.die.net/man/1/xdg-open
 std::string GetErrorDescription(int error_code) {
   switch (error_code) {
@@ -409,6 +495,14 @@ bool PlatformTrashItem(const base::FilePath& full_path, std::string* error) {
     return false;
   }
   return true;
+}
+
+void PlatformTrashItemAsync(
+    const base::FilePath& path,
+    base::OnceCallback<void(PlatformTrashItemAsyncResult, const std::string&)>
+        callback) {
+  TrashItemHelper::GetInstance().TrashItemUsingPortal(path,
+                                                      std::move(callback));
 }
 
 }  // namespace internal
